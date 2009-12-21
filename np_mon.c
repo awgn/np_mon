@@ -394,10 +394,10 @@ int mon_rebuild_header(struct sk_buff *skb)
 
     printk(KERN_INFO "np_mon: %s\n", __FUNCTION__);
     switch (eth->h_proto) {
-        //#ifdef CONFIG_INET
-        //    case __constant_htons(ETH_P_IP):
-        //        return arp_find(eth->h_dest, skb);
-        //#endif
+        #ifdef CONFIG_INET
+            case __constant_htons(ETH_P_IP):
+                return arp_find(eth->h_dest, skb);
+        #endif
     default:
         printk(KERN_DEBUG
                "%s: unable to resolve type %X addresses.\n",
