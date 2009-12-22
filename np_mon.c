@@ -171,6 +171,21 @@ int np_mon_pkt_recv(struct sk_buff * skb, struct net_device * dev, struct packet
 
         mac_len = skb_network_header(skb)-skb_mac_header(skb);
 
+#ifdef ZERO_COPY
+        nskb = skb_clone(skb, GFP_KERNEL);
+        if (unlikely(!nskb)) {
+             if (printk_ratelimit())
+ 		        printk(KERN_WARNING "np_mon: %s memory squeeze, dropping packet.\n", mon->name);
+ 			priv->stats.rx_dropped++;
+ 			break;
+        }
+
+        nskb->data = p - mac_len;
+        skb_reset_tail_pointer(nskb);
+
+        skb_copy_to_linear_data(nskb, skb_mac_header(skb), mac_len);
+        skb_put(nskb, frag_len + mac_len); 
+#else
         /* create a new skb */
 
         nskb = dev_alloc_skb(frag_len + mac_len + 2);
@@ -187,6 +202,7 @@ int np_mon_pkt_recv(struct sk_buff * skb, struct net_device * dev, struct packet
         skb_copy_to_linear_data_offset(nskb, mac_len, p, frag_len);
 
         skb_put(nskb, frag_len + mac_len); 
+#endif
 
         /* update the newly created sk_buff */
         nskb->dev = mon;
@@ -289,27 +305,15 @@ int mon_config(struct net_device *dev, struct ifmap *map)
     return 0;
 }
 
-/* enable and disable receive interrupts  */
-
-// static void mon_rx_ints(struct net_device *dev, int enable)
-// {
-//     struct np_mon_priv *priv = netdev_priv(dev);
-//     printk(KERN_INFO "np_mon: %s\n", __FUNCTION__);
-//     priv->rx_int_enabled = enable;
-// }
-
 void mon_rx(struct net_device *dev, struct sk_buff *pkt)
 {
     struct np_mon_priv *priv = netdev_priv(dev);
 
-    printk(KERN_INFO "np_mon: %s\n", __FUNCTION__);
-    /*
-     * The packet has been retrieved from the transmission
-     * medium. Build an skb around it, so upper layers can handle it
-     */
+    // printk(KERN_INFO "np_mon: %s\n", __FUNCTION__);
 
     priv->stats.rx_packets++;
     priv->stats.rx_bytes += pkt->data_len;
+
     netif_receive_skb(pkt);
     return;
 }
@@ -333,7 +337,7 @@ int mon_tx(struct sk_buff *skb, struct net_device *dev)
 int mon_header_parse(const struct sk_buff *skb, unsigned char *haddr)
 {
     const struct ethhdr *eth = eth_hdr(skb);
-    printk(KERN_INFO "np_mon: %s\n", __FUNCTION__);
+    // printk(KERN_INFO "np_mon: %s\n", __FUNCTION__);
     memcpy(haddr, eth->h_source, ETH_ALEN);
     return ETH_ALEN;
 }
@@ -344,7 +348,7 @@ int mon_header(struct sk_buff *skb, struct net_device *dev,
 {
     struct ethhdr *eth = (struct ethhdr *)skb_push(skb, ETH_HLEN);
 
-    printk(KERN_INFO "np_mon: %s\n", __FUNCTION__);
+    // printk(KERN_INFO "np_mon: %s\n", __FUNCTION__);
 
     if (type != ETH_P_802_3)
         eth->h_proto = htons(type);
@@ -517,7 +521,12 @@ int __init np_mon_init_module(void)
     printk(KERN_INFO "registering protocol: 0x%x.\n", NP_PKT_TYPE);
     dev_add_pack(&np_packet_type);
 
+#ifdef ZERO_COPY
+    printk(KERN_INFO "np_mon loaded [ZERO_COPY].\n" );
+#else
     printk(KERN_INFO "np_mon loaded.\n" );
+#endif
+
     return 0;
 
 fail:
