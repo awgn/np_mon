@@ -241,7 +241,7 @@ int mon_open(struct net_device *dev)
     return 0;
 }
 
-int mon_close(struct net_device *dev)
+int mon_stop(struct net_device *dev)
 {
     printk(KERN_INFO "np_mon: %s\n", __FUNCTION__);
     netif_stop_queue(dev);
@@ -319,7 +319,7 @@ void mon_rx(struct net_device *dev, struct sk_buff *pkt)
 }
 
 
-int mon_tx(struct sk_buff *skb, struct net_device *dev)
+int mon_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
     struct np_mon_priv *priv = netdev_priv(dev);
 
@@ -424,11 +424,24 @@ const struct header_ops mon_header_ops ____cacheline_aligned = {
     .cache_update   = NULL, // mon_header_cache_update,
 };
 
+#ifdef HAVE_NET_DEVICE_OPS
+
+const struct net_device_ops mon_netdev_ops = {
+    .ndo_set_config = mon_config,
+    .ndo_start_xmit = mon_start_xmit,
+    .ndo_do_ioctl   = mon_ioctl,
+    .ndo_get_stats  = mon_stats,
+    .ndo_open       = mon_open,
+    .ndo_stop       = mon_stop,
+};
+
+#endif
+
 void np_mon_setup(struct net_device *dev)
 {
     struct np_mon_priv *priv;
-    
     printk( KERN_DEBUG "np_mon_setup: net_device@%p\n", dev);
+
     ether_setup(dev); /* assign some of the fields */
 
     // set by ether_setup():
@@ -440,17 +453,19 @@ void np_mon_setup(struct net_device *dev)
 
     dev->header_ops      = &mon_header_ops;
 
+#ifdef HAVE_NET_DEVICE_OPS
+    dev->netdev_ops = &mon_netdev_ops;
+#else
     dev->set_config      = mon_config;
-    dev->hard_start_xmit = mon_tx;
+    dev->hard_start_xmit = mon_start_xmit;
     dev->do_ioctl        = mon_ioctl;
     dev->get_stats       = mon_stats;
-
     dev->change_mtu      = NULL; // mon_change_mtu;
-
     dev->set_mac_address = mon_set_mac_address;
-
     dev->open            = mon_open;
-    dev->stop            = mon_close;
+    dev->stop            = mon_stop;
+    dev->tx_timeout      = NULL;
+#endif
 
     dev->flags          |= IFF_NOARP;
     dev->features        = NETIF_F_NO_CSUM;
@@ -458,7 +473,6 @@ void np_mon_setup(struct net_device *dev)
 
     random_ether_addr(dev->dev_addr); 
 
-    dev->tx_timeout      = NULL; // mon_tx_timeout;
     dev->watchdog_timeo  = 0;
 
     /*
