@@ -509,7 +509,7 @@ int __init np_mon_init_one(int index)
 }
 
 
-void __exit np_mon_free_one(int index)
+void np_mon_free_one(int index)
 {
     unregister_netdev( np_mon_devs[index] );
     free_netdev( np_mon_devs[index] );
