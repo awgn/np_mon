@@ -172,7 +172,7 @@ int np_mon_pkt_recv(struct sk_buff * skb, struct net_device * dev, struct packet
         mac_len = skb_network_header(skb)-skb_mac_header(skb);
 
 #ifdef ZERO_COPY
-        nskb = skb_clone(skb, GFP_KERNEL);
+        nskb = skb_clone(skb, GFP_ATOMIC);
         if (unlikely(!nskb)) {
              if (printk_ratelimit())
  		        printk(KERN_WARNING "np_mon: %s memory squeeze, dropping packet.\n", mon->name);
@@ -182,7 +182,6 @@ int np_mon_pkt_recv(struct sk_buff * skb, struct net_device * dev, struct packet
 
         nskb->data = p - mac_len;
         skb_reset_tail_pointer(nskb);
-
         skb_copy_to_linear_data(nskb, skb_mac_header(skb), mac_len);
         skb_put(nskb, frag_len + mac_len); 
 #else
