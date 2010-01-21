@@ -3,7 +3,7 @@ TARGET = np_mon
 OBJS = np_mon.o
 MDIR = drivers/misc
 
-EXTRA_CFLAGS = -DEXPORT_SYMTAB -DZERO_COPY
+EXTRA_CFLAGS = -DEXPORT_SYMTAB # -DZERO_COPY
 CURRENT = $(shell uname -r)
 KDIR = /lib/modules/$(CURRENT)/build
 PWD = $(shell pwd)

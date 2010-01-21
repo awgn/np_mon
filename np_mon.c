@@ -251,8 +251,8 @@ int mon_stop(struct net_device *dev)
 
 int mon_ioctl (struct net_device* dev, struct ifreq* rq, int cmd)
 {
-    printk(KERN_DEBUG "np_mon: ioctl %d not supported!\n",cmd);
-    return EOPNOTSUPP;
+    // printk(KERN_DEBUG "np_mon: ioctl %d not supported!\n",cmd);
+    return -EOPNOTSUPP;
 }
 
 
@@ -497,14 +497,20 @@ int __init np_mon_init_one(int index)
     if (dev == NULL)
         return -ENOMEM;
 
+    err = dev_alloc_name(dev, dev->name);
+    if (err < 0)
+        goto err;
+
     err = register_netdev(dev);
-    if (err) {
-        free_netdev(dev);
-        return err;
-    }
+    if (err < 0) 
+        goto err; 
 
     np_mon_devs[index] = dev; 
     return 0;
+
+err:
+    free_netdev(dev);
+    return err;
 }
 
 
