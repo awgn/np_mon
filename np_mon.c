@@ -1,7 +1,7 @@
 /*
  * NP trafmon driver
  *
- * Copyright (c) 2009 Bonelli Nicola <bonelli@antifork.org>
+ * Copyright (c) 2009/2010 Bonelli Nicola <bonelli@antifork.org>
  *
  * All rights reserved.
  *
@@ -29,6 +29,7 @@
 
 #include <linux/kernel.h>
 #include <linux/init.h>
+#include <linux/version.h>
 #include <linux/module.h>
 #include <linux/moduleparam.h>
 #include <linux/netdevice.h>
@@ -53,6 +54,7 @@ MODULE_LICENSE("Dual BSD/GPL");
 /* typedefs */
 
 int np_mon_pkt_recv(struct sk_buff *skb, struct net_device *dev, struct packet_type *ptype, struct net_device *orig_dev);
+
 
 int nmon = 1;                       /* number of mon interfaces */
 struct net_device **np_mon_devs;    /* array of ptr to monitor interface */
@@ -93,114 +95,136 @@ MODULE_PARM_DESC(np_clock, "NP clock (nsec)");
  * np_packet: packet handler 
  */
 
-int np_mon_pkt_recv(struct sk_buff * skb, struct net_device * dev, struct packet_type * pkt_type, struct net_device * device2)
+int np_mon_pkt_recv(struct sk_buff * skb, struct net_device * dev, 
+                    struct packet_type * pkt_type, struct net_device * orig_dev)
 {
     struct net_device *mon;
-    char * p, *p_end; // cursor 
+    char * p, *p_end; /* cursor */ 
 
     struct sk_buff * nskb;  
+    int fn = 0;
 
-    if (!skb)
-        return 0;
- 
-    p = (char *)skb->data;
- 
     /* update utc0 at the arrival of the first packet */
-
     if (!utc0.tv64) { 
         utc0 = ktime_get_real();
     }
-  
-    for ( ; p < (char *)skb_tail_pointer(skb); p = p_end ) {
+
+    p = (char *)skb->data;
+
+    rcu_read_lock();
+
+    for ( ; p < (char *)skb_tail_pointer(skb); p = p_end, fn++ ) {
 
         unsigned long long tick;
-
-        struct np_mon_priv * priv=netdev_priv(dev);
+        struct np_mon_priv *priv;
         struct np_packet_hdr * np_h; 
         struct ethhdr * eh;
 
         unsigned short flow_id;
         unsigned short frag_len;
+        unsigned short ip_pack_len;
         unsigned short mac_len;
 
         if ( (p + sizeof(struct np_packet_hdr)) >= (char *) skb_tail_pointer(skb) ) {
             /* incomplete header */
-            printk(KERN_WARNING "np_mon: incomplete np header\n");
+            printk(KERN_WARNING "np_mon: incomplete np header, frame_num=%d\n",fn);
             break;
         }
-     
+
         /* read the np_packet header */
         np_h = (struct np_packet_hdr *)p;
 
         /* update utc0 and tick0 at the arrival of the first packet */
-
         if (!tick0) 
         {
             tick0 = (unsigned long long)ntohl(np_h->tstamp_hi)*1000000000 +
-                    (unsigned long long)ntohl(np_h->tstamp_lo);
+            (unsigned long long)ntohl(np_h->tstamp_lo);
         }
 
         tick = (unsigned long long)ntohl(np_h->tstamp_hi)*1000000000 +
-               (unsigned long long)ntohl(np_h->tstamp_lo);
-
-        /* ----------------------------------------------------- */
-
-        // printk(KERN_WARNING "np_mon: frag_len=%d\n", ntohs(np_h->frag_len));
+        (unsigned long long)ntohl(np_h->tstamp_lo);
 
         /* p and p_end delimit the np fragment */
+
         p += sizeof(struct np_packet_hdr);
         p_end = p + ntohs(np_h->frag_len);
-        
+
         if (p_end > (char *) skb_tail_pointer(skb) ) {
             /* incomplete fragment */
-            printk(KERN_WARNING "np_mon: incomplete fragment in np_packet\n");
+            printk(KERN_WARNING "np_mon: incomplete fragment in np_packet, frame_num=%d (frag_len=%d missing_bytes=%d)\n",
+                   fn, ntohs(np_h->frag_len), p_end - (char *) skb_tail_pointer(skb) );
+
             p_end = skb_tail_pointer(skb);
         } 
 
         frag_len = (p_end - p);
-        flow_id = ntohs(np_h->flow_id);
+        flow_id  = ntohs(np_h->flow_id);
 
         /* demultiplex sanity check */
         if ( flow_id >= nmon ) {
-            printk(KERN_WARNING "np_mon: flow_id out of range\n");
+            printk(KERN_WARNING "np_mon: frame_num=%d, flow_id out of range -> mon%d does not exist!\n",fn, flow_id);
             continue; 
         }
 
-        mon  = np_mon_devs[flow_id];
+        mon = np_mon_devs[flow_id];
         priv = netdev_priv(mon);
-
         mac_len = skb_network_header(skb)-skb_mac_header(skb);
+
+        /*
+         * NP packet length includes:
+         *	
+         *  np_h->pack_len = mac header + ip packet + ethernet crc
+         *
+         *  which means that a 1500 bytes IP packet has 1518 pack_len in the 
+         *  NP header
+         *
+         */
+
+        /* we are interested in the IP fragment length...
+         */
+
+        ip_pack_len = ntohs(np_h->pack_len) - 14 /* mac_header  */ - 4 /* crc */ ;
+
+        /* ... and from now on we consider the ip_pack_len as the length of 
+         * the packet/fragment ip, that is the minimum length between
+         * the frag_len and the pack_len... (Nicola)
+         */
+
+        ip_pack_len = ( ip_pack_len < frag_len ? ip_pack_len : frag_len );
+
+        if (ip_pack_len < 40)
+        {
+            printk(KERN_WARNING "np_mon: malformed fragment num=%d (ip_pack_len=%d)\n",
+                   fn, ip_pack_len);
+            continue;
+        }
 
 #ifdef ZERO_COPY
         nskb = skb_clone(skb, GFP_ATOMIC);
         if (unlikely(!nskb)) {
-             if (printk_ratelimit())
- 		        printk(KERN_WARNING "np_mon: %s memory squeeze, dropping packet.\n", mon->name);
- 			priv->stats.rx_dropped++;
- 			break;
+            if (printk_ratelimit())
+                printk(KERN_WARNING "np_mon: %s memory squeeze, dropping packet.\n", mon->name);
+            priv->stats.rx_dropped++;
+            break;
         }
 
         nskb->data = p - mac_len;
-        skb_reset_tail_pointer(nskb);
         skb_copy_to_linear_data(nskb, skb_mac_header(skb), mac_len);
-        skb_put(nskb, frag_len + mac_len); 
+        skb_put(nskb, mac_len + ip_pack_len); 
 #else
         /* create a new skb */
-
-        nskb = dev_alloc_skb(frag_len + mac_len + 2);
+        nskb = dev_alloc_skb(mac_len + ip_pack_len + 2);
         if (unlikely(!nskb)) {
-             if (printk_ratelimit())
- 		        printk(KERN_WARNING "np_mon: %s memory squeeze, dropping packet.\n", mon->name);
- 			priv->stats.rx_dropped++;
- 			break;
+            if (printk_ratelimit())
+                printk(KERN_WARNING "np_mon: %s memory squeeze, dropping packet.\n", mon->name);
+            priv->stats.rx_dropped++;
+            break;
         }
-
-        skb_reserve(nskb, 2);     
+        skb_reserve(nskb, 2);  /* optimization to get the right align */    
 
         skb_copy_to_linear_data_offset(nskb, 0, skb_mac_header(skb), mac_len);
-        skb_copy_to_linear_data_offset(nskb, mac_len, p, frag_len);
-
-        skb_put(nskb, frag_len + mac_len); 
+        skb_copy_to_linear_data_offset(nskb, mac_len, p, ip_pack_len);
+        skb_put(nskb, mac_len + ip_pack_len); 
 #endif
 
         /* update the newly created sk_buff */
@@ -212,21 +236,27 @@ int np_mon_pkt_recv(struct sk_buff * skb, struct net_device * dev, struct packet
 
         /* update the protocol */
         skb_reset_mac_header(nskb);
-        
+
         eh = eth_hdr(nskb);
         eh->h_proto = htons(ETH_P_IP);
-        // eh->h_proto = htons(frag_len); /* = ntohs(np_h->frag_len) unless the fragment is incomplete */
 
         nskb->protocol = eth_type_trans(nskb, mon);
 
         priv->stats.rx_packets++;
-		priv->stats.rx_bytes += ntohs(np_h->pack_len);
+        priv->stats.rx_bytes += ntohs(np_h->pack_len);
 
-        netif_receive_skb(nskb);
+        /* netif_receive_skb(nskb); */
+        netif_rx(nskb);
     }
+    rcu_read_unlock();
 
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,6,30)
+    consume_skb(skb);   /* like kfree_skb, but only for packets successfully consumed (not dropped) */
+#else
     kfree_skb(skb);
-    return 0;
+#endif
+
+    return NET_RX_SUCCESS;
 }
 
 ////////////////////////////////////////////////////////////////////////////
@@ -251,7 +281,7 @@ int mon_stop(struct net_device *dev)
 
 int mon_ioctl (struct net_device* dev, struct ifreq* rq, int cmd)
 {
-    // printk(KERN_DEBUG "np_mon: ioctl %d not supported!\n",cmd);
+    printk(KERN_DEBUG "np_mon: ioctl %d not supported!\n",cmd);
     return -EOPNOTSUPP;
 }
 
@@ -304,29 +334,15 @@ int mon_config(struct net_device *dev, struct ifmap *map)
     return 0;
 }
 
-void mon_rx(struct net_device *dev, struct sk_buff *pkt)
-{
-    struct np_mon_priv *priv = netdev_priv(dev);
-
-    // printk(KERN_INFO "np_mon: %s\n", __FUNCTION__);
-
-    priv->stats.rx_packets++;
-    priv->stats.rx_bytes += pkt->data_len;
-
-    netif_receive_skb(pkt);
-    return;
-}
-
+/* mon interface is readonly */
 
 int mon_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
     struct np_mon_priv *priv = netdev_priv(dev);
 
-    // printk(KERN_INFO "np_mon: %s\n", __FUNCTION__);
-
     priv->stats.tx_packets++;
     priv->stats.tx_bytes += skb->len;
-    
+
     dev_kfree_skb(skb);
     return 0; 
 }
@@ -397,10 +413,10 @@ int mon_rebuild_header(struct sk_buff *skb)
 
     printk(KERN_INFO "np_mon: %s\n", __FUNCTION__);
     switch (eth->h_proto) {
-        #ifdef CONFIG_INET
-            case __constant_htons(ETH_P_IP):
-                return arp_find(eth->h_dest, skb);
-        #endif
+#ifdef CONFIG_INET
+    case __constant_htons(ETH_P_IP):
+        return arp_find(eth->h_dest, skb);
+#endif
     default:
         printk(KERN_DEBUG
                "%s: unable to resolve type %X addresses.\n",
@@ -481,10 +497,6 @@ void np_mon_setup(struct net_device *dev)
 
     priv = netdev_priv(dev);
     memset(priv, 0, sizeof(struct np_mon_priv));
- 
-    // skb_queue_head_init(&(priv->rx_queue));
-    // spin_lock_init(&priv->lock);
-    // mon_rx_ints(dev, 1);  /* enable receive interrupts */
 }
 
 
@@ -497,20 +509,14 @@ int __init np_mon_init_one(int index)
     if (dev == NULL)
         return -ENOMEM;
 
-    err = dev_alloc_name(dev, dev->name);
-    if (err < 0)
-        goto err;
-
     err = register_netdev(dev);
-    if (err < 0) 
-        goto err; 
+    if (err) {
+        free_netdev(dev);
+        return err;
+    }
 
     np_mon_devs[index] = dev; 
     return 0;
-
-err:
-    free_netdev(dev);
-    return err;
 }
 
 
