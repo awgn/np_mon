@@ -137,12 +137,12 @@ int np_mon_pkt_recv(struct sk_buff * skb, struct net_device * dev,
         /* update utc0 and tick0 at the arrival of the first packet */
         if (!tick0) 
         {
-            tick0 = (unsigned long long)ntohl(np_h->tstamp_hi)*1000000000 +
-            (unsigned long long)ntohl(np_h->tstamp_lo);
+            tick0 = ((unsigned long long)ntohl(np_h->tstamp_hi)) << 32 | 
+                     (unsigned long long)ntohl(np_h->tstamp_lo);
         }
 
-        tick = (unsigned long long)ntohl(np_h->tstamp_hi)*1000000000 +
-        (unsigned long long)ntohl(np_h->tstamp_lo);
+        tick = ((unsigned long long)ntohl(np_h->tstamp_hi)) << 32 |
+                (unsigned long long)ntohl(np_h->tstamp_lo);
 
         /* p and p_end delimit the np fragment */
 
